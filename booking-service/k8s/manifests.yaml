@@ -1,0 +1,235 @@
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trains
+
+---
+# ── Postgres PVC ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: trains
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+# ── Postgres Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: trains
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              value: bookings
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: POSTGRES_PASSWORD
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+
+---
+# ── Postgres Service ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: trains
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+# ── Secrets (update values before applying) ───────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: booking-secrets
+  namespace: trains
+type: Opaque
+stringData:
+  POSTGRES_USER: booking
+  POSTGRES_PASSWORD: changeme          # ← change this
+  DATABASE_URL: "postgres://booking:changeme@postgres:5432/bookings"
+  # Grafana Cloud Tempo OTLP — get from your stack's "Send data" page
+  OTEL_EXPORTER_OTLP_ENDPOINT: "https://tempo-prod-XX-prod-YY-ZZ.grafana.net"
+  OTEL_EXPORTER_OTLP_HEADERS:  "Authorization=Basic <base64(instanceID:token)>"
+
+---
+# ── Booking Service Deployment ────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-service
+  namespace: trains
+  labels:
+    app: booking-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: booking-service
+  template:
+    metadata:
+      labels:
+        app: booking-service
+      annotations:
+        # Tell Alloy/Prometheus to scrape this pod if you add a /metrics endpoint later
+        prometheus.io/scrape: "false"
+    spec:
+      initContainers:
+        # Run the migration SQL before the server starts
+        - name: migrate
+          image: harbor.srclos.net/trains/booking-service:latest   # ← your registry
+          command: [sh, -c]
+          args:
+            - |
+              apk add --no-cache postgresql-client 2>/dev/null || true
+              psql "$DATABASE_URL" -f /app/migrations/001_init.sql
+              echo "migration done"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: DATABASE_URL
+      containers:
+        - name: booking-service
+          image: harbor.srclos.net/trains/booking-service:latest   # ← your registry
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: DATABASE_URL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: OTEL_EXPORTER_OTLP_HEADERS
+            - name: OTEL_SERVICE_NAME
+              value: booking-service
+            - name: PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+# ── Booking Service ───────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking-service
+  namespace: trains
+spec:
+  selector:
+    app: booking-service
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+
+---
+# ── Ingress ───────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: booking-service
+  namespace: trains
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    external-dns.alpha.kubernetes.io/hostname: booking.trains.srclos.net
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: booking.trains.srclos.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  name: http
+  tls:
+    - hosts: [booking.trains.srclos.net]
+      secretName: booking-service-tls

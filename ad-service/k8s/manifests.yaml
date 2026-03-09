@@ -1,0 +1,104 @@
+# ad-service — deploys into the existing trains namespace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ad-service
+  namespace: trains
+  labels:
+    app: ad-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ad-service
+  template:
+    metadata:
+      labels:
+        app: ad-service
+    spec:
+      containers:
+        - name: ad-service
+          image: harbor.srclos.net/trains/ad-service:latest
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: BOOKING_SERVICE_URL
+              value: "http://booking-service.trains.svc.cluster.local"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets   # reuse the same secret
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: booking-secrets
+                  key: OTEL_EXPORTER_OTLP_HEADERS
+            - name: OTEL_SERVICE_NAME
+              value: ad-service
+            - name: PORT
+              value: "8081"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 30m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ad-service
+  namespace: trains
+spec:
+  selector:
+    app: ad-service
+  ports:
+    - port: 80
+      targetPort: 8081
+      name: http
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ad-service
+  namespace: trains
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    external-dns.alpha.kubernetes.io/hostname: ads.trains.srclos.net
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ads.trains.srclos.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ad-service
+                port:
+                  name: http
+  tls:
+    - hosts: [ads.trains.srclos.net]
+      secretName: ad-service-tls

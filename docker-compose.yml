@@ -1,0 +1,84 @@
+version: "3.9"
+
+# ── Shared OTel environment ────────────────────────────────────────────────────
+x-otel: &otel
+  OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+  OTEL_EXPORTER_OTLP_HEADERS:  "${OTEL_EXPORTER_OTLP_HEADERS:-}"
+
+services:
+
+  # ── Postgres (shared, two databases) ────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB:       bookings
+      POSTGRES_USER:     booking
+      POSTGRES_PASSWORD: booking
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    healthcheck:
+      test: [CMD, pg_isready, -U, booking]
+      interval: 5s
+      retries: 5
+
+  # ── booking-service ──────────────────────────────────────────────────────────
+  booking-service:
+    build:
+      context: ./booking-service
+    ports:
+      - "5080:8080"
+    environment:
+      <<: *otel
+      DATABASE_URL:        postgres://booking:booking@postgres:5432/bookings
+      OTEL_SERVICE_NAME:   booking-service
+      PORT:                "8080"
+      LOG_PRETTY:          "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "psql $$DATABASE_URL -f /app/migrations/001_init.sql &&
+             /app/booking-service"
+
+  # ── ad-service ───────────────────────────────────────────────────────────────
+  ad-service:
+    build:
+      context: ./ad-service
+    ports:
+      - "5081:8081"
+    environment:
+      <<: *otel
+      BOOKING_SERVICE_URL: http://booking-service:8080
+      OTEL_SERVICE_NAME:   ad-service
+      PORT:                "8081"
+      LOG_PRETTY:          "true"
+    depends_on:
+      - booking-service
+
+  # ── payment-service ──────────────────────────────────────────────────────────
+  payment-service:
+    build:
+      context: ./payment-service
+    ports:
+      - "5082:8082"
+    environment:
+      <<: *otel
+      DATABASE_URL:        postgres://booking:booking@postgres:5432/payments
+      BOOKING_SERVICE_URL: http://booking-service:8080
+      OTEL_SERVICE_NAME:   payment-service
+      PORT:                "8082"
+      LOG_PRETTY:          "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      booking-service:
+        condition: service_started
+    command: >
+      sh -c "psql $$DATABASE_URL -f /app/migrations/001_init.sql &&
+             /app/payment-service"
+
+volumes:
+  pgdata:

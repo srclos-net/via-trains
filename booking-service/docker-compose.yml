@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bookings
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -U, booking]
+      interval: 5s
+      retries: 5
+
+  booking-service:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://booking:booking@postgres:5432/bookings
+      PORT: "8080"
+      LOG_PRETTY: "true"
+      # Grafana Cloud Tempo — set these to see traces
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_HEADERS:  "${OTEL_EXPORTER_OTLP_HEADERS:-}"
+      OTEL_SERVICE_NAME: booking-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Run migration then start the server
+    command: sh -c "apk add postgresql-client 2>/dev/null; psql $$DATABASE_URL -f /app/migrations/001_init.sql; /app/booking-service"
+
+volumes:
+  pgdata:
