@@ -1,0 +1,18 @@
+# Deploy layer for Argo CD (Application in deploy/argocd.yaml; path=deploy).
+# CI pins image tags here after every push to main (see .github/scripts).
+# Internal-only: these services have no Ingress (the kiosk front end in the
+# train-demo repo is client-side; backend is reachable OBI-side, not UI-side).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - postgres.yaml
+  - booking-service.yaml
+  - ad-service.yaml
+  - payment-service.yaml
+images:
+  - name: ghcr.io/srclos-net/via-trains-booking-service
+    newTag: sha-latest
+  - name: ghcr.io/srclos-net/via-trains-ad-service
+    newTag: sha-latest
+  - name: ghcr.io/srclos-net/via-trains-payment-service
+    newTag: sha-latest

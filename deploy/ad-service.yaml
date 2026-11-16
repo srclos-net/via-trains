@@ -1,0 +1,57 @@
+# ad-service: no database; pulls bookings from booking-service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ad-service
+  namespace: trains
+  labels:
+    app.kubernetes.io/name: ad-service
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ad-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ad-service
+    spec:
+      containers:
+        - name: ad-service
+          image: ghcr.io/srclos-net/via-trains-ad-service
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BOOKING_SERVICE_URL
+              value: http://booking-service:8080
+            - name: OTEL_SERVICE_NAME
+              value: ad-service
+            - name: PORT
+              value: "8081"
+            - name: LOG_PRETTY
+              value: "true"
+          ports:
+            - containerPort: 8081
+          livenessProbe:
+            httpGet: { path: /health, port: 8081 }
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: 8081 }
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ad-service
+  namespace: trains
+spec:
+  selector:
+    app.kubernetes.io/name: ad-service
+  ports:
+    - port: 80
+      targetPort: 8081

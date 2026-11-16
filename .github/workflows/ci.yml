@@ -1,0 +1,97 @@
+name: ci
+
+# Build/push the via-trains service images to ghcr.io/srclos-net and pin the
+# tags in deploy/kustomization.yaml, which the Argo CD Application on
+# fe-stackgen-run syncs automatically (GitOps).
+#
+# Guard against loops: images tagged from a "[ci-auto]" commit are identical
+# to the previous run, so the guard step exits early on such commits.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: srclos-net/via-trains-
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          msg="$(git log -1 --format=%s)"
+          echo "last commit: $msg"
+          if echo "$msg" | grep -q '\[ci-auto\]'; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+  images:
+    runs-on: ubuntu-latest
+    needs: guard
+    if: needs.guard.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - booking-service
+          - ad-service
+          - payment-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.service }}:sha-${{ needs.guard.outputs.sha }}
+          provenance: false
+          platforms: linux/amd64
+
+      # Like martian-bank-demo: GHCR packages are born PRIVATE. Flip public
+      # once via the package's Package settings → Danger Zone → Change
+      # visibility, or the cluster node pull will 403 (no imagePullSecrets).
+      # There is no REST endpoint to change visibility.
+
+  pin-tags:
+    runs-on: ubuntu-latest
+    needs: [guard, images]
+    if: needs.guard.outputs.build == 'true' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin the pushed image tags in deploy/kustomization.yaml
+        run: python3 .github/scripts/bump_kustomization.py "${{ needs.guard.outputs.sha }}"
+      - name: Commit and push the tag bump
+        run: |
+          sha="${{ needs.guard.outputs.sha }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deploy/kustomization.yaml
+          git commit -m "[ci-auto] pin images to sha-${sha} [skip ci]" || echo "nothing to commit"
+          git pull --rebase --autostash origin main
+          git push origin main

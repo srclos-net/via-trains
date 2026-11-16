@@ -1,0 +1,63 @@
+# payment-service: applies its schema at boot, serves on :8082.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: trains
+  labels:
+    app.kubernetes.io/name: payment-service
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: payment-service
+    spec:
+      containers:
+        - name: payment-service
+          image: ghcr.io/srclos-net/via-trains-payment-service
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - psql $$DATABASE_URL -f /app/migrations/001_init.sql && exec /app/payment-service
+          env:
+            - name: DATABASE_URL
+              value: postgres://booking:booking@postgres:5432/payments
+            - name: BOOKING_SERVICE_URL
+              value: http://booking-service:8080
+            - name: OTEL_SERVICE_NAME
+              value: payment-service
+            - name: PORT
+              value: "8082"
+            - name: LOG_PRETTY
+              value: "true"
+          ports:
+            - containerPort: 8082
+          livenessProbe:
+            httpGet: { path: /health, port: 8082 }
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: 8082 }
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: trains
+spec:
+  selector:
+    app.kubernetes.io/name: payment-service
+  ports:
+    - port: 80
+      targetPort: 8082

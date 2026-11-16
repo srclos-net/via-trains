@@ -1,0 +1,66 @@
+# booking-service: applies its own schema via psql at boot (same as the
+# compose command), then serves on :8080.
+#
+# NO OTEL_EXPORTER_OTLP_ENDPOINT: OBI (the eBPF DaemonSet) auto-instruments
+# every pod in this cluster and exports to the devopsnow collector — setting
+# the SDK env would double the spans.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-service
+  namespace: trains
+  labels:
+    app.kubernetes.io/name: booking-service
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: booking-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: booking-service
+    spec:
+      containers:
+        - name: booking-service
+          image: ghcr.io/srclos-net/via-trains-booking-service
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - psql $$DATABASE_URL -f /app/migrations/001_init.sql && exec /app/booking-service
+          env:
+            - name: DATABASE_URL
+              value: postgres://booking:booking@postgres:5432/bookings
+            - name: OTEL_SERVICE_NAME
+              value: booking-service
+            - name: PORT
+              value: "8080"
+            - name: LOG_PRETTY
+              value: "true"
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking-service
+  namespace: trains
+spec:
+  selector:
+    app.kubernetes.io/name: booking-service
+  ports:
+    - port: 80
+      targetPort: 8080
