@@ -11,8 +11,8 @@ resources:
   - payment-service.yaml
 images:
   - name: ghcr.io/srclos-net/via-trains-booking-service
-    newTag: sha-latest
+    newTag: sha-1c2ed10
   - name: ghcr.io/srclos-net/via-trains-ad-service
-    newTag: sha-latest
+    newTag: sha-1c2ed10
   - name: ghcr.io/srclos-net/via-trains-payment-service
-    newTag: sha-latest
+    newTag: sha-1c2ed10
